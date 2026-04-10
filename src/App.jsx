@@ -7,9 +7,6 @@ const firebaseConfig = {
   authDomain: "test-ig-31e35.firebaseapp.com",
   databaseURL: "https://test-ig-31e35-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "test-ig-31e35",
-  storageBucket: "test-ig-31e35.appspot.com",
-  messagingSenderId: "532701227283",
-  appId: "1:532701227283:web:ed90d07d5db239f26192e6"
 };
 
 const app = initializeApp(firebaseConfig);
@@ -21,15 +18,7 @@ const CELL = 48;
 const createBoard = () =>
   Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
 
-const normalize = (data) => {
-  const empty = createBoard();
-  if (!data?.board) return empty;
-  return Array.from({ length: SIZE }, (_, y) =>
-    Array.from({ length: SIZE }, (_, x) =>
-      data.board?.[y]?.[x] ?? null
-    )
-  );
-};
+const serialize = (b) => JSON.stringify(b);
 
 const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
 
@@ -57,29 +46,16 @@ function hasLiberty(b,g){
   );
 }
 
-const sameBoard = (a,b)=>JSON.stringify(a)===JSON.stringify(b);
-
 export default function App(){
   const [board,setBoard]=useState(createBoard());
-  const [prevBoard,setPrevBoard]=useState(null);
+  const [history,setHistory]=useState([]);
   const [turn,setTurn]=useState("black");
   const [roomId,setRoomId]=useState("");
   const [connected,setConnected]=useState(false);
   const [player,setPlayer]=useState(null);
   const [lastMove,setLastMove]=useState(null);
-  const [passCount,setPassCount]=useState(0);
-  const [result,setResult]=useState(null);
 
   const userId = useMemo(()=>Math.random().toString(36).slice(2,10),[]);
-
-  // URLからroom取得
-  useEffect(()=>{
-    const urlParams = new URLSearchParams(window.location.search);
-    const rid = urlParams.get("room");
-    if(rid){
-      setRoomId(rid);
-    }
-  },[]);
 
   useEffect(()=>{
     if(!connected||!roomId) return;
@@ -89,12 +65,10 @@ export default function App(){
       const d=s.val();
       if(!d) return;
 
-      setBoard(normalize(d));
-      setTurn(d.turn||"black");
-      setPrevBoard(d.prevBoard||null);
-      setLastMove(d.lastMove||null);
-      setPassCount(d.passCount||0);
-      setResult(d.result||null);
+      setBoard(d.board || createBoard());
+      setTurn(d.turn || "black");
+      setHistory(d.history || []);
+      setLastMove(d.lastMove || null);
 
       if(d.players){
         if(d.players.black===userId) setPlayer("black");
@@ -103,7 +77,7 @@ export default function App(){
     });
 
     return ()=>unsub();
-  },[connected,roomId,userId]);
+  },[connected,roomId]);
 
   const connect=async()=>{
     const r=ref(db,`rooms/${roomId}`);
@@ -112,10 +86,9 @@ export default function App(){
     if(!snap.exists()){
       await set(r,{
         board:createBoard(),
-        prevBoard:null,
+        history:[],
         turn:"black",
-        players:{black:userId},
-        passCount:0
+        players:{black:userId}
       });
       setPlayer("black");
     }else{
@@ -135,13 +108,11 @@ export default function App(){
       await update(r,u);
     }
 
-    // URL更新
-    window.history.replaceState(null,"",`?room=${roomId}`);
     setConnected(true);
   };
 
   const click=(x,y)=>{
-    if(!connected||turn!==player||board[y][x]||result) return;
+    if(turn!==player || board[y][x]) return;
 
     const nb=board.map(r=>[...r]);
     nb[y][x]=player;
@@ -160,107 +131,58 @@ export default function App(){
     const self=getGroup(nb,x,y);
     if(!hasLiberty(nb,self)) return;
 
-    if(prevBoard && sameBoard(nb, prevBoard)){
-      alert("コウで禁止手");
+    // コウ判定（履歴比較）
+    const key = serialize(nb);
+    if(history.includes(key)){
+      alert("コウ禁止");
       return;
     }
 
+    const newHistory = [...history, serialize(board)];
+
     set(ref(db,`rooms/${roomId}`),{
       board:nb,
-      prevBoard:board,
+      history:newHistory,
       turn:opp,
-      lastMove:{x,y},
-      passCount:0
+      lastMove:{x,y}
     });
-  };
-
-  const pass=()=>{
-    const newPass = passCount + 1;
-
-    if(newPass >= 2){
-      // 簡易勝敗（石数）
-      let black=0, white=0;
-      board.forEach(r=>r.forEach(c=>{
-        if(c==="black") black++;
-        if(c==="white") white++;
-      }));
-
-      const resultText = black > white ? "黒勝ち" : "白勝ち";
-
-      set(ref(db,`rooms/${roomId}`),{
-        ...{
-          board, prevBoard, turn
-        },
-        result: resultText
-      });
-    }else{
-      set(ref(db,`rooms/${roomId}`),{
-        board,
-        prevBoard,
-        turn: turn==="black"?"white":"black",
-        passCount:newPass
-      });
-    }
-  };
-
-  const reset=()=>{
-    set(ref(db,`rooms/${roomId}`),{
-      board:createBoard(),
-      turn:"black",
-      prevBoard:null,
-      passCount:0,
-      result:null
-    });
-  };
-
-  const createRoom=()=>{
-    setRoomId(Math.random().toString(36).slice(2,8));
   };
 
   return (
     <div style={{
       minHeight:"100vh",
-      background:"linear-gradient(135deg,#1e293b,#334155)",
-      color:"#e5e7eb",
+      background:"#0f172a",
+      color:"#e2e8f0",
       display:"flex",
       flexDirection:"column",
       alignItems:"center",
-      padding:"20px"
+      padding:20
     }}>
-      <h1>Go Online</h1>
+      <h1 style={{fontSize:28,fontWeight:"bold"}}>Go Online</h1>
 
-      <div>
+      <div style={{marginBottom:10}}>
         <input value={roomId} onChange={e=>setRoomId(e.target.value)} />
-        <button onClick={createRoom}>新規</button>
         <button onClick={connect}>接続</button>
       </div>
 
-      <div>あなた: {player || "未割当"}</div>
-      <div style={{color: turn===player ? "#22c55e":"#94a3b8"}}>
-        手番: {turn}
-      </div>
-
-      {result && <h2>{result}</h2>}
-
-      <div>
-        <button onClick={pass}>パス</button>
-        <button onClick={reset}>リセット</button>
-      </div>
+      <div>あなた: {player}</div>
+      <div>手番: {turn}</div>
 
       <div style={{
         position:"relative",
-        width: CELL * (SIZE-1),
-        height: CELL * (SIZE-1),
-        marginTop:"20px",
-        background:"#d1a95a"
+        width:CELL*(SIZE-1),
+        height:CELL*(SIZE-1),
+        background:"#d9a74f",
+        boxShadow:"inset 0 0 20px rgba(0,0,0,0.4)",
+        marginTop:20
       }}>
         {[...Array(SIZE)].map((_,i)=>(
           <React.Fragment key={i}>
             <div style={{
-              position:"absolute", top:i*CELL, width:"100%", height:2, background:"#5b3a1a"
+              position:"absolute",top:i*CELL,width:"100%",height:2,background:"#5b3a1a"
             }}/>
             <div style={{
-              position:"absolute", left:i*CELL, height:"100%", width:2, background:"#5b3a1a"
+              position:"absolute",left:i*CELL,height:"100%",width:2,background:"#5b3a1a"
             }}/>
           </React.Fragment>
         ))}
@@ -274,8 +196,7 @@ export default function App(){
                 left:x*CELL,
                 top:y*CELL,
                 transform:"translate(-50%,-50%)",
-                width:36,
-                height:36,
+                width:40,height:40,
                 display:"flex",
                 alignItems:"center",
                 justifyContent:"center",
@@ -285,18 +206,20 @@ export default function App(){
               {lastMove?.x===x && lastMove?.y===y && (
                 <div style={{
                   position:"absolute",
-                  width:40,height:40,
+                  width:44,height:44,
                   borderRadius:"50%",
-                  background:"rgba(255,255,255,0.25)"
+                  background:"rgba(255,255,255,0.3)"
                 }}/>
               )}
 
               {cell && (
                 <div style={{
-                  width:24,height:24,
+                  width:26,height:26,
                   borderRadius:"50%",
-                  background:cell,
-                  boxShadow:"0 3px 8px rgba(0,0,0,0.6)"
+                  background:cell==="black"
+                    ? "radial-gradient(circle at 30% 30%, #666, #000)"
+                    : "radial-gradient(circle at 30% 30%, #fff, #ccc)",
+                  boxShadow:"0 4px 10px rgba(0,0,0,0.7)"
                 }}/>
               )}
             </div>
