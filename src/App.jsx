@@ -12,17 +12,12 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
-const SIZE = 9;
-const CELL = 48;
-
-const createBoard = () =>
-  Array.from({ length: SIZE }, () => Array(SIZE).fill(null));
-
-const serialize = (b) => JSON.stringify(b);
+const createBoard = (size) =>
+  Array.from({ length: size }, () => Array(size).fill(null));
 
 const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
 
-function getGroup(b,x,y,visited=new Set()){
+function getGroup(b,x,y,size,visited=new Set()){
   const c=b[y][x];
   const k=`${x},${y}`;
   if(visited.has(k)) return [];
@@ -30,30 +25,33 @@ function getGroup(b,x,y,visited=new Set()){
   let g=[[x,y]];
   dirs.forEach(([dx,dy])=>{
     const nx=x+dx, ny=y+dy;
-    if(nx>=0&&ny>=0&&nx<SIZE&&ny<SIZE&&b[ny][nx]===c){
-      g=g.concat(getGroup(b,nx,ny,visited));
+    if(nx>=0&&ny>=0&&nx<size&&ny<size&&b[ny][nx]===c){
+      g=g.concat(getGroup(b,nx,ny,size,visited));
     }
   });
   return g;
 }
 
-function hasLiberty(b,g){
+function hasLiberty(b,g,size){
   return g.some(([x,y]) =>
     dirs.some(([dx,dy])=>{
       const nx=x+dx, ny=y+dy;
-      return nx>=0&&ny>=0&&nx<SIZE&&ny<SIZE&&b[ny][nx]===null;
+      return nx>=0&&ny>=0&&nx<size&&ny<size&&b[ny][nx]===null;
     })
   );
 }
 
+const serialize = (b) => JSON.stringify(b);
+
 export default function App(){
-  const [board,setBoard]=useState(createBoard());
+  const [board,setBoard]=useState([]);
   const [history,setHistory]=useState([]);
   const [turn,setTurn]=useState("black");
   const [roomId,setRoomId]=useState("");
   const [connected,setConnected]=useState(false);
   const [player,setPlayer]=useState(null);
-  const [lastMove,setLastMove]=useState(null);
+  const [size,setSize]=useState(9);
+  const [mode,setMode]=useState("pvp"); // pvp or ai
 
   const userId = useMemo(()=>Math.random().toString(36).slice(2,10),[]);
 
@@ -65,10 +63,11 @@ export default function App(){
       const d=s.val();
       if(!d) return;
 
-      setBoard(d.board || createBoard());
-      setTurn(d.turn || "black");
+      setBoard(d.board);
+      setTurn(d.turn);
       setHistory(d.history || []);
-      setLastMove(d.lastMove || null);
+      setSize(d.size || 9);
+      setMode(d.mode || "pvp");
 
       if(d.players){
         if(d.players.black===userId) setPlayer("black");
@@ -85,10 +84,14 @@ export default function App(){
 
     if(!snap.exists()){
       await set(r,{
-        board:createBoard(),
+        board:createBoard(size),
         history:[],
         turn:"black",
-        players:{black:userId}
+        size,
+        mode,
+        players: mode==="ai"
+          ? {black:userId, white:"AI"}
+          : {black:userId}
       });
       setPlayer("black");
     }else{
@@ -98,12 +101,9 @@ export default function App(){
       if(!d.players?.black){
         u["players/black"]=userId;
         setPlayer("black");
-      }else if(!d.players?.white){
+      }else if(!d.players?.white && d.mode==="pvp"){
         u["players/white"]=userId;
         setPlayer("white");
-      }else{
-        alert("満員");
-        return;
       }
       await update(r,u);
     }
@@ -111,58 +111,110 @@ export default function App(){
     setConnected(true);
   };
 
-  const click=(x,y)=>{
-    if(turn!==player || board[y][x]) return;
-
-    const nb=board.map(r=>[...r]);
+  const playMove=(b,x,y,player)=>{
+    const nb=b.map(r=>[...r]);
     nb[y][x]=player;
     const opp=player==="black"?"white":"black";
 
     dirs.forEach(([dx,dy])=>{
       const nx=x+dx, ny=y+dy;
-      if(nx>=0&&ny>=0&&nx<SIZE&&ny<SIZE&&nb[ny][nx]===opp){
-        const g=getGroup(nb,nx,ny);
-        if(!hasLiberty(nb,g)){
+      if(nx>=0&&ny>=0&&nx<size&&ny<size&&nb[ny][nx]===opp){
+        const g=getGroup(nb,nx,ny,size);
+        if(!hasLiberty(nb,g,size)){
           g.forEach(([gx,gy])=>nb[gy][gx]=null);
         }
       }
     });
 
-    const self=getGroup(nb,x,y);
-    if(!hasLiberty(nb,self)) return;
+    const self=getGroup(nb,x,y,size);
+    if(!hasLiberty(nb,self,size)) return null;
 
-    // コウ判定（履歴比較）
-    const key = serialize(nb);
-    if(history.includes(key)){
+    return nb;
+  };
+
+  const click=(x,y)=>{
+    if(turn!==player || board[y][x]) return;
+
+    const nb = playMove(board,x,y,player);
+    if(!nb) return;
+
+    if(history.includes(serialize(nb))){
       alert("コウ禁止");
       return;
     }
 
-    const newHistory = [...history, serialize(board)];
+    const newHistory=[...history, serialize(board)];
+    const next = player==="black"?"white":"black";
 
     set(ref(db,`rooms/${roomId}`),{
       board:nb,
       history:newHistory,
-      turn:opp,
-      lastMove:{x,y}
+      turn:next,
+      size,
+      mode,
+      players: mode==="ai"
+        ? {black:userId, white:"AI"}
+        : undefined
     });
   };
+
+  // ===== AI =====
+  useEffect(()=>{
+    if(mode!=="ai" || turn!=="white" || !connected) return;
+
+    setTimeout(()=>{
+      for(let y=0;y<size;y++){
+        for(let x=0;x<size;x++){
+          if(!board[y][x]){
+            const nb=playMove(board,x,y,"white");
+            if(nb){
+              set(ref(db,`rooms/${roomId}`),{
+                board:nb,
+                history:[...history, serialize(board)],
+                turn:"black",
+                size,
+                mode
+              });
+              return;
+            }
+          }
+        }
+      }
+    },500);
+  },[turn,mode,board]);
+
+  const CELL = Math.min(48, 400/size);
 
   return (
     <div style={{
       minHeight:"100vh",
       background:"#0f172a",
-      color:"#e2e8f0",
+      color:"#fff",
       display:"flex",
       flexDirection:"column",
       alignItems:"center",
       padding:20
     }}>
-      <h1 style={{fontSize:28,fontWeight:"bold"}}>Go Online</h1>
+      <h1>Go Online</h1>
 
-      <div style={{marginBottom:10}}>
+      <div>
         <input value={roomId} onChange={e=>setRoomId(e.target.value)} />
         <button onClick={connect}>接続</button>
+      </div>
+
+      <div style={{marginTop:10}}>
+        盤サイズ:
+        <select value={size} onChange={e=>setSize(Number(e.target.value))}>
+          <option value={9}>9路</option>
+          <option value={13}>13路</option>
+          <option value={19}>19路</option>
+        </select>
+
+        モード:
+        <select value={mode} onChange={e=>setMode(e.target.value)}>
+          <option value="pvp">対人</option>
+          <option value="ai">AI</option>
+        </select>
       </div>
 
       <div>あなた: {player}</div>
@@ -170,13 +222,12 @@ export default function App(){
 
       <div style={{
         position:"relative",
-        width:CELL*(SIZE-1),
-        height:CELL*(SIZE-1),
+        width:CELL*(size-1),
+        height:CELL*(size-1),
         background:"#d9a74f",
-        boxShadow:"inset 0 0 20px rgba(0,0,0,0.4)",
         marginTop:20
       }}>
-        {[...Array(SIZE)].map((_,i)=>(
+        {[...Array(size)].map((_,i)=>(
           <React.Fragment key={i}>
             <div style={{
               position:"absolute",top:i*CELL,width:"100%",height:2,background:"#5b3a1a"
@@ -197,29 +248,16 @@ export default function App(){
                 top:y*CELL,
                 transform:"translate(-50%,-50%)",
                 width:40,height:40,
-                display:"flex",
-                alignItems:"center",
-                justifyContent:"center",
                 cursor:"pointer"
               }}
             >
-              {lastMove?.x===x && lastMove?.y===y && (
-                <div style={{
-                  position:"absolute",
-                  width:44,height:44,
-                  borderRadius:"50%",
-                  background:"rgba(255,255,255,0.3)"
-                }}/>
-              )}
-
               {cell && (
                 <div style={{
-                  width:26,height:26,
+                  width:24,height:24,
                   borderRadius:"50%",
                   background:cell==="black"
-                    ? "radial-gradient(circle at 30% 30%, #666, #000)"
-                    : "radial-gradient(circle at 30% 30%, #fff, #ccc)",
-                  boxShadow:"0 4px 10px rgba(0,0,0,0.7)"
+                    ? "radial-gradient(#666,#000)"
+                    : "radial-gradient(#fff,#ccc)"
                 }}/>
               )}
             </div>
