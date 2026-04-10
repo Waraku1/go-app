@@ -12,16 +12,18 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
+const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+
 const createBoard = (size) =>
   Array.from({ length: size }, () => Array(size).fill(null));
 
-const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
+const serialize = (b) => JSON.stringify(b);
 
 function getGroup(b,x,y,size,visited=new Set()){
   const c=b[y][x];
-  const k=`${x},${y}`;
-  if(visited.has(k)) return [];
-  visited.add(k);
+  const key=`${x},${y}`;
+  if(visited.has(key)) return [];
+  visited.add(key);
   let g=[[x,y]];
   dirs.forEach(([dx,dy])=>{
     const nx=x+dx, ny=y+dy;
@@ -41,20 +43,21 @@ function hasLiberty(b,g,size){
   );
 }
 
-const serialize = (b) => JSON.stringify(b);
-
 export default function App(){
+  const [roomId,setRoomId]=useState("");
+  const [connected,setConnected]=useState(false);
+
+  const [size,setSize]=useState(9);
+  const [mode,setMode]=useState("pvp");
+
   const [board,setBoard]=useState([]);
   const [history,setHistory]=useState([]);
   const [turn,setTurn]=useState("black");
-  const [roomId,setRoomId]=useState("");
-  const [connected,setConnected]=useState(false);
   const [player,setPlayer]=useState(null);
-  const [size,setSize]=useState(9);
-  const [mode,setMode]=useState("pvp"); // pvp or ai
 
   const userId = useMemo(()=>Math.random().toString(36).slice(2,10),[]);
 
+  // ===== 接続 =====
   useEffect(()=>{
     if(!connected||!roomId) return;
 
@@ -64,10 +67,10 @@ export default function App(){
       if(!d) return;
 
       setBoard(d.board);
+      setHistory(d.history||[]);
       setTurn(d.turn);
-      setHistory(d.history || []);
-      setSize(d.size || 9);
-      setMode(d.mode || "pvp");
+      setSize(d.size);
+      setMode(d.mode);
 
       if(d.players){
         if(d.players.black===userId) setPlayer("black");
@@ -78,43 +81,52 @@ export default function App(){
     return ()=>unsub();
   },[connected,roomId]);
 
-  const connect=async()=>{
-    const r=ref(db,`rooms/${roomId}`);
-    const snap=await get(r);
+  // ===== ルーム作成 =====
+  const createRoom = async()=>{
+    const id = Math.random().toString(36).slice(2,8);
+    setRoomId(id);
 
-    if(!snap.exists()){
-      await set(r,{
-        board:createBoard(size),
-        history:[],
-        turn:"black",
-        size,
-        mode,
-        players: mode==="ai"
-          ? {black:userId, white:"AI"}
-          : {black:userId}
-      });
-      setPlayer("black");
-    }else{
-      const d=snap.val();
-      let u={};
+    await set(ref(db,`rooms/${id}`),{
+      board:createBoard(size),
+      history:[],
+      turn:"black",
+      size,
+      mode,
+      players: mode==="ai"
+        ? {black:userId, white:"AI"}
+        : {black:userId}
+    });
 
-      if(!d.players?.black){
-        u["players/black"]=userId;
-        setPlayer("black");
-      }else if(!d.players?.white && d.mode==="pvp"){
-        u["players/white"]=userId;
-        setPlayer("white");
-      }
-      await update(r,u);
-    }
-
+    setPlayer("black");
     setConnected(true);
   };
 
-  const playMove=(b,x,y,player)=>{
+  // ===== 参加 =====
+  const joinRoom = async()=>{
+    const r=ref(db,`rooms/${roomId}`);
+    const snap=await get(r);
+    if(!snap.exists()){
+      alert("ルームが存在しません");
+      return;
+    }
+
+    const d=snap.val();
+    let updates={};
+
+    if(!d.players?.white && d.mode==="pvp"){
+      updates["players/white"]=userId;
+      setPlayer("white");
+    }
+
+    await update(r,updates);
+    setConnected(true);
+  };
+
+  // ===== 石置き =====
+  const playMove=(b,x,y,p)=>{
     const nb=b.map(r=>[...r]);
-    nb[y][x]=player;
-    const opp=player==="black"?"white":"black";
+    nb[y][x]=p;
+    const opp=p==="black"?"white":"black";
 
     dirs.forEach(([dx,dy])=>{
       const nx=x+dx, ny=y+dy;
@@ -143,18 +155,14 @@ export default function App(){
       return;
     }
 
-    const newHistory=[...history, serialize(board)];
     const next = player==="black"?"white":"black";
 
     set(ref(db,`rooms/${roomId}`),{
       board:nb,
-      history:newHistory,
+      history:[...history, serialize(board)],
       turn:next,
       size,
-      mode,
-      players: mode==="ai"
-        ? {black:userId, white:"AI"}
-        : undefined
+      mode
     });
   };
 
@@ -186,84 +194,83 @@ export default function App(){
   const CELL = Math.min(48, 400/size);
 
   return (
-    <div style={{
-      minHeight:"100vh",
-      background:"#0f172a",
-      color:"#fff",
-      display:"flex",
-      flexDirection:"column",
-      alignItems:"center",
-      padding:20
-    }}>
+    <div style={{padding:20, color:"#fff", background:"#0f172a", minHeight:"100vh"}}>
       <h1>Go Online</h1>
 
-      <div>
-        <input value={roomId} onChange={e=>setRoomId(e.target.value)} />
-        <button onClick={connect}>接続</button>
-      </div>
+      {!connected && (
+        <>
+          <div>
+            <input placeholder="ルームID" value={roomId} onChange={e=>setRoomId(e.target.value)} />
+          </div>
 
-      <div style={{marginTop:10}}>
-        盤サイズ:
-        <select value={size} onChange={e=>setSize(Number(e.target.value))}>
-          <option value={9}>9路</option>
-          <option value={13}>13路</option>
-          <option value={19}>19路</option>
-        </select>
+          <div>
+            路数:
+            <select value={size} onChange={e=>setSize(Number(e.target.value))}>
+              <option value={9}>9路</option>
+              <option value={13}>13路</option>
+              <option value={19}>19路</option>
+            </select>
+          </div>
 
-        モード:
-        <select value={mode} onChange={e=>setMode(e.target.value)}>
-          <option value="pvp">対人</option>
-          <option value="ai">AI</option>
-        </select>
-      </div>
+          <div>
+            モード:
+            <select value={mode} onChange={e=>setMode(e.target.value)}>
+              <option value="pvp">対人</option>
+              <option value="ai">AI対戦</option>
+            </select>
+          </div>
 
-      <div>あなた: {player}</div>
-      <div>手番: {turn}</div>
+          <button onClick={createRoom}>ルーム作成</button>
+          <button onClick={joinRoom}>参加</button>
+        </>
+      )}
 
-      <div style={{
-        position:"relative",
-        width:CELL*(size-1),
-        height:CELL*(size-1),
-        background:"#d9a74f",
-        marginTop:20
-      }}>
-        {[...Array(size)].map((_,i)=>(
-          <React.Fragment key={i}>
-            <div style={{
-              position:"absolute",top:i*CELL,width:"100%",height:2,background:"#5b3a1a"
-            }}/>
-            <div style={{
-              position:"absolute",left:i*CELL,height:"100%",width:2,background:"#5b3a1a"
-            }}/>
-          </React.Fragment>
-        ))}
+      {connected && (
+        <>
+          <div>あなた: {player}</div>
+          <div>手番: {turn}</div>
 
-        {board.map((row,y)=>
-          row.map((cell,x)=>(
-            <div key={`${x}-${y}`}
-              onClick={()=>click(x,y)}
-              style={{
-                position:"absolute",
-                left:x*CELL,
-                top:y*CELL,
-                transform:"translate(-50%,-50%)",
-                width:40,height:40,
-                cursor:"pointer"
-              }}
-            >
-              {cell && (
-                <div style={{
-                  width:24,height:24,
-                  borderRadius:"50%",
-                  background:cell==="black"
-                    ? "radial-gradient(#666,#000)"
-                    : "radial-gradient(#fff,#ccc)"
-                }}/>
-              )}
-            </div>
-          ))
-        )}
-      </div>
+          <div style={{
+            position:"relative",
+            width:CELL*(size-1),
+            height:CELL*(size-1),
+            background:"#d9a74f",
+            marginTop:20
+          }}>
+            {[...Array(size)].map((_,i)=>(
+              <React.Fragment key={i}>
+                <div style={{position:"absolute",top:i*CELL,width:"100%",height:2,background:"#5b3a1a"}}/>
+                <div style={{position:"absolute",left:i*CELL,height:"100%",width:2,background:"#5b3a1a"}}/>
+              </React.Fragment>
+            ))}
+
+            {board.map((row,y)=>
+              row.map((cell,x)=>(
+                <div key={`${x}-${y}`}
+                  onClick={()=>click(x,y)}
+                  style={{
+                    position:"absolute",
+                    left:x*CELL,
+                    top:y*CELL,
+                    transform:"translate(-50%,-50%)",
+                    width:40,height:40
+                  }}
+                >
+                  {cell && (
+                    <div style={{
+                      width:24,height:24,
+                      borderRadius:"50%",
+                      background:cell==="black"
+                        ? "radial-gradient(#666,#000)"
+                        : "radial-gradient(#fff,#ccc)"
+                    }}/>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
