@@ -44,33 +44,40 @@ function hasLiberty(b,g,size){
 }
 
 export default function App(){
+
+  // ===== 基本状態 =====
   const [roomId,setRoomId]=useState("");
   const [connected,setConnected]=useState(false);
 
   const [size,setSize]=useState(9);
   const [mode,setMode]=useState("pvp");
 
-  const [board,setBoard]=useState([]);
+  // ★ ここが重要（nullスタート）
+  const [board,setBoard]=useState(null);
+
   const [history,setHistory]=useState([]);
   const [turn,setTurn]=useState("black");
   const [player,setPlayer]=useState(null);
 
   const userId = useMemo(()=>Math.random().toString(36).slice(2,10),[]);
 
-  // ===== 接続 =====
+  // ===== Firebase同期 =====
   useEffect(()=>{
-    if(!connected||!roomId) return;
+    if(!connected || !roomId) return;
 
     const r=ref(db,`rooms/${roomId}`);
     const unsub=onValue(r,s=>{
       const d=s.val();
       if(!d) return;
 
+      // ★ 完全防御
+      if(!d.board || !Array.isArray(d.board)) return;
+
       setBoard(d.board);
-      setHistory(d.history||[]);
-      setTurn(d.turn);
-      setSize(d.size);
-      setMode(d.mode);
+      setHistory(d.history || []);
+      setTurn(d.turn || "black");
+      setSize(d.size || 9);
+      setMode(d.mode || "pvp");
 
       if(d.players){
         if(d.players.black===userId) setPlayer("black");
@@ -86,10 +93,12 @@ export default function App(){
     const id = Math.random().toString(36).slice(2,8);
     setRoomId(id);
 
+    const initialBoard = createBoard(size);
+
     await set(ref(db,`rooms/${id}`),{
-      board:createBoard(size),
-      history:[],
-      turn:"black",
+      board: initialBoard,
+      history: [],
+      turn: "black",
       size,
       mode,
       players: mode==="ai"
@@ -97,6 +106,7 @@ export default function App(){
         : {black:userId}
     });
 
+    setBoard(initialBoard); // ★ 即反映でクラッシュ防止
     setPlayer("black");
     setConnected(true);
   };
@@ -105,6 +115,7 @@ export default function App(){
   const joinRoom = async()=>{
     const r=ref(db,`rooms/${roomId}`);
     const snap=await get(r);
+
     if(!snap.exists()){
       alert("ルームが存在しません");
       return;
@@ -122,7 +133,7 @@ export default function App(){
     setConnected(true);
   };
 
-  // ===== 石置き =====
+  // ===== 着手処理 =====
   const playMove=(b,x,y,p)=>{
     const nb=b.map(r=>[...r]);
     nb[y][x]=p;
@@ -145,6 +156,7 @@ export default function App(){
   };
 
   const click=(x,y)=>{
+    if(!board) return;
     if(turn!==player || board[y][x]) return;
 
     const nb = playMove(board,x,y,player);
@@ -168,7 +180,7 @@ export default function App(){
 
   // ===== AI =====
   useEffect(()=>{
-    if(mode!=="ai" || turn!=="white" || !connected) return;
+    if(mode!=="ai" || turn!=="white" || !connected || !board) return;
 
     setTimeout(()=>{
       for(let y=0;y<size;y++){
@@ -188,20 +200,28 @@ export default function App(){
           }
         }
       }
-    },500);
+    },400);
   },[turn,mode,board]);
 
   const CELL = Math.min(48, 400/size);
 
   return (
-    <div style={{padding:20, color:"#fff", background:"#0f172a", minHeight:"100vh"}}>
+    <div style={{
+      padding:20,
+      background:"#0f172a",
+      color:"#fff",
+      minHeight:"100vh"
+    }}>
       <h1>Go Online</h1>
 
+      {/* ===== 接続前UI ===== */}
       {!connected && (
         <>
-          <div>
-            <input placeholder="ルームID" value={roomId} onChange={e=>setRoomId(e.target.value)} />
-          </div>
+          <input
+            placeholder="ルームID"
+            value={roomId}
+            onChange={e=>setRoomId(e.target.value)}
+          />
 
           <div>
             路数:
@@ -225,7 +245,8 @@ export default function App(){
         </>
       )}
 
-      {connected && (
+      {/* ===== 接続後UI ===== */}
+      {connected && board && (
         <>
           <div>あなた: {player}</div>
           <div>手番: {turn}</div>
@@ -239,8 +260,20 @@ export default function App(){
           }}>
             {[...Array(size)].map((_,i)=>(
               <React.Fragment key={i}>
-                <div style={{position:"absolute",top:i*CELL,width:"100%",height:2,background:"#5b3a1a"}}/>
-                <div style={{position:"absolute",left:i*CELL,height:"100%",width:2,background:"#5b3a1a"}}/>
+                <div style={{
+                  position:"absolute",
+                  top:i*CELL,
+                  width:"100%",
+                  height:2,
+                  background:"#5b3a1a"
+                }}/>
+                <div style={{
+                  position:"absolute",
+                  left:i*CELL,
+                  height:"100%",
+                  width:2,
+                  background:"#5b3a1a"
+                }}/>
               </React.Fragment>
             ))}
 
@@ -253,12 +286,15 @@ export default function App(){
                     left:x*CELL,
                     top:y*CELL,
                     transform:"translate(-50%,-50%)",
-                    width:40,height:40
+                    width:40,
+                    height:40,
+                    cursor:"pointer"
                   }}
                 >
                   {cell && (
                     <div style={{
-                      width:24,height:24,
+                      width:24,
+                      height:24,
                       borderRadius:"50%",
                       background:cell==="black"
                         ? "radial-gradient(#666,#000)"
